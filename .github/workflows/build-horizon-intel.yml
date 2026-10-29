@@ -1,0 +1,136 @@
+name: Build Horizon for Intel macOS (preview)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/build-horizon-intel.yml
+
+permissions:
+  contents: read
+
+jobs:
+  game:
+    name: Build Intel game
+    runs-on: macos-15-intel
+    timeout-minutes: 180
+    env:
+      CARGO_BUILD_JOBS: "3"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+    steps:
+      - name: Verify Intel machine
+        run: |
+          uname -m
+          df -h .
+          test "$(uname -m)" = x86_64
+      - name: Fetch upstream macOS x64 port (PR 1171)
+        run: |
+          set -euo pipefail
+          git clone --no-checkout --filter=blob:none https://github.com/horizon-rust/horizon.git horizon
+          cd horizon
+          git fetch --depth=1 origin pull/1171/head
+          git checkout -q --detach FETCH_HEAD
+          git log -1 --oneline
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - name: Compile client and preparer
+        working-directory: horizon
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target x86_64-apple-darwin --features horizon-client/mods -p horizon-client --bin horizon-client --bin horizon-ctl -p horizon-prepare --bin horizon-prepare
+          df -h .
+      - name: Package Intel game
+        working-directory: horizon
+        run: |
+          set -euo pipefail
+          bin="$PWD/target/x86_64-apple-darwin/release"
+          mkdir -p dist/Horizon-Intel
+          git archive HEAD | tar -xf - -C dist/Horizon-Intel
+          for name in horizon-client horizon-ctl horizon-prepare; do
+            test "$(lipo -archs "$bin/$name")" = x86_64
+            "$bin/$name" --help >/dev/null
+            cp "$bin/$name" "dist/Horizon-Intel/$name"
+            codesign --force --sign - "dist/Horizon-Intel/$name"
+          done
+          cat > dist/Horizon-Intel/START-HERE.txt <<'HELP'
+          Unofficial Horizon Intel Mac developer build (PR #1171).
+          This archive contains NO copyrighted Minecraft files.
+          A legally owned Minecraft Java Edition 26.3 installation,
+          matching official server.jar, JDK 25, and Python 3.10+ are needed.
+          In this extracted directory:
+            ./horizon-prepare --prepare --server-jar /path/to/server.jar
+            ./horizon-client
+          Consult README.md for detailed preparation instructions.
+          HELP
+          (cd dist && ditto -c -k --norsrc --noextattr --noqtn --keepParent Horizon-Intel horizon-macos-x64-preview.zip)
+          shasum -a 256 dist/horizon-macos-x64-preview.zip
+      - name: Upload game ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: horizon-macos-x64-preview
+          path: horizon/dist/horizon-macos-x64-preview.zip
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+
+  launcher:
+    name: Build Intel launcher and DMG
+    runs-on: macos-15-intel
+    timeout-minutes: 180
+    env:
+      CARGO_BUILD_JOBS: "3"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+    steps:
+      - name: Fetch upstream macOS x64 port (PR 1171)
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          git clone --no-checkout --filter=blob:none https://github.com/horizon-rust/horizon.git horizon
+          cd horizon
+          git fetch --depth=1 origin pull/1171/head
+          git checkout -q --detach FETCH_HEAD
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - name: Compile Intel launcher
+        working-directory: horizon/launcher
+        run: |
+          set -euo pipefail
+          if xcrun metal --version >/dev/null 2>&1; then
+            cargo build --release --locked --target x86_64-apple-darwin
+          else
+            cargo build --release --locked --target x86_64-apple-darwin --features gpui/runtime_shaders
+          fi
+          exe=target/x86_64-apple-darwin/release/horizon-launcher
+          test "$(lipo -archs "$exe")" = x86_64
+          "$exe" --version
+          df -h .
+      - name: Build ad-hoc signed app and DMG
+        working-directory: horizon
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/horizon-dmgbuild"
+          "$RUNNER_TEMP/horizon-dmgbuild/bin/python" -m pip install --quiet dmgbuild==1.6.5
+          version=$(grep '^version = ' launcher/Cargo.toml | head -1 | cut -d '"' -f 2)
+          DMGBUILD="$RUNNER_TEMP/horizon-dmgbuild/bin/dmgbuild" bash packaging/macos/package.sh "$PWD/launcher/target/x86_64-apple-darwin/release/horizon-launcher" "$version" "$PWD/dist/launcher" x64
+          shasum -a 256 dist/launcher/horizon-launcher-macos-x64.zip dist/launcher/horizon-launcher-macos-x64.dmg
+      - name: Upload launcher ZIP and DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: horizon-launcher-macos-x64-preview
+          path: |
+            horizon/dist/launcher/horizon-launcher-macos-x64.zip
+            horizon/dist/launcher/horizon-launcher-macos-x64.dmg
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
