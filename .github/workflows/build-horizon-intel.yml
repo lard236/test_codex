@@ -43,7 +43,7 @@ jobs:
         working-directory: horizon
         run: |
           set -euo pipefail
-          cargo build --release --locked --target x86_64-apple-darwin --features horizon-client/mods -p horizon-client --bin horizon-client --bin horizon-ctl -p horizon-prepare --bin horizon-prepare
+          cargo build --release --locked --target x86_64-apple-darwin -p horizon-client --bin horizon-client --bin horizon-ctl -p horizon-prepare --bin horizon-prepare
           df -h .
       - name: Package Intel game
         working-directory: horizon
